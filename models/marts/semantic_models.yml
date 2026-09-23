@@ -1,0 +1,201 @@
+version: 2
+
+semantic_models:
+  # -------------------------------------------------------------
+  # 0. MetricFlow Time Spine
+  # -------------------------------------------------------------
+  - name: metricflow_time_spine
+    model: ref('metricflow_time_spine')
+    description: "Daily time spine table required by MetricFlow."
+    primary_entity: date_day
+
+    defaults:
+      agg_time_dimension: date_day
+
+    dimensions:
+      - name: date_day
+        type: time
+        type_params:
+          time_granularity: day
+
+  # -------------------------------------------------------------
+  # 1. Customer Dimension Semantic Model
+  # -------------------------------------------------------------
+  - name: dim_customers
+    model: ref('dim_customers')
+    description: "Customer dimension attributes and cohort groupings."
+
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_id
+
+    dimensions:
+      - name: customer_name
+        type: categorical
+      - name: customer_email
+        type: categorical
+      - name: currency
+        type: categorical
+      - name: first_active_month
+        type: time
+        type_params:
+          time_granularity: month
+      - name: created_at
+        type: time
+        type_params:
+          time_granularity: day
+
+  # -------------------------------------------------------------
+  # 2. Monthly MRR Snapshot Semantic Model
+  # -------------------------------------------------------------
+  - name: fct_mrr_months
+    model: ref('fct_mrr_months')
+    description: "Point-in-time monthly active subscription MRR balances."
+
+    entities:
+      - name: subscription_month
+        type: primary
+        expr: subscription_month_id
+      - name: customer
+        type: foreign
+        expr: customer_id
+      - name: subscription
+        type: foreign
+        expr: subscription_id
+
+    dimensions:
+      - name: date_month
+        type: time
+        type_params:
+          time_granularity: month
+
+    defaults:
+      agg_time_dimension: date_month
+
+    measures:
+      - name: total_mrr
+        description: "Total Active Monthly Recurring Revenue."
+        expr: monthly_mrr
+        agg: sum
+        agg_time_dimension: date_month
+
+      - name: active_subscription_count
+        description: "Count of distinct active subscriptions."
+        expr: subscription_id
+        agg: count_distinct
+        agg_time_dimension: date_month
+
+      - name: active_customer_count
+        description: "Count of distinct active paying customers."
+        expr: customer_id
+        agg: count_distinct
+        agg_time_dimension: date_month
+
+  # -------------------------------------------------------------
+  # 3. MRR Movements Event Semantic Model
+  # -------------------------------------------------------------
+  - name: fct_mrr_movements
+    model: ref('fct_mrr_movements')
+    description: "Event log of all subscription expansion, contraction, churn, and new revenue shifts."
+
+    entities:
+      - name: mrr_movement
+        type: primary
+        expr: mrr_movement_id
+      - name: customer
+        type: foreign
+        expr: customer_id
+      - name: subscription
+        type: foreign
+        expr: subscription_id
+
+    dimensions:
+      - name: mrr_movement_type
+        type: categorical
+      - name: customer_status
+        type: categorical
+      - name: movement_at
+        type: time
+        type_params:
+          time_granularity: day
+
+    defaults:
+      agg_time_dimension: movement_at
+
+    measures:
+      - name: mrr_change_amount
+        description: "Net change in MRR for any movement event."
+        expr: mrr_change
+        agg: sum
+        agg_time_dimension: movement_at
+
+      - name: churned_mrr
+        description: "Gross lost MRR from customer cancellations."
+        expr: case when mrr_movement_type = 'churn' then mrr_change else 0 end
+        agg: sum
+        agg_time_dimension: movement_at
+
+      - name: expansion_mrr
+        description: "Gained MRR from subscription plan upgrades."
+        expr: case when mrr_movement_type = 'expansion' then mrr_change else 0 end
+        agg: sum
+        agg_time_dimension: movement_at
+
+      - name: new_mrr
+        description: "Gained MRR from brand-new subscription signups."
+        expr: case when mrr_movement_type = 'new' then mrr_change else 0 end
+        agg: sum
+        agg_time_dimension: movement_at
+
+# -------------------------------------------------------------
+# Derived Business Metrics Exposed to Lightdash / MetricFlow
+# -------------------------------------------------------------
+metrics:
+  - name: mrr
+    description: "Total Monthly Recurring Revenue."
+    type: simple
+    label: "Total MRR"
+    type_params:
+      measure: total_mrr
+
+  - name: arr
+    description: "Annual Recurring Revenue Run Rate."
+    type: derived
+    label: "ARR"
+    type_params:
+      expr: mrr * 12
+      metrics:
+        - name: mrr
+
+  - name: arpu
+    description: "Average Revenue Per User."
+    type: derived
+    label: "ARPU"
+    type_params:
+      expr: total_mrr / active_customers
+      metrics:
+        - name: mrr
+          alias: total_mrr
+        - name: active_customers
+
+  - name: active_customers
+    description: "Total active customer count."
+    type: simple
+    label: "Active Customers"
+    type_params:
+      measure: active_customer_count
+
+  - name: gross_churn_mrr
+    description: "Total MRR lost due to churn."
+    type: simple
+    label: "Gross Churn MRR"
+    type_params:
+      measure: churned_mrr
+
+  - name: expansion_mrr
+    description: "Total MRR gained through expansions."
+    type: simple
+    label: "Expansion MRR"
+    type_params:
+      measure: expansion_mrr

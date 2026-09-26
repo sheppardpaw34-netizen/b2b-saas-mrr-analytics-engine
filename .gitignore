@@ -1,12 +1,9 @@
-
 target/
 dbt_packages/
 logs/
 dev.duckdb
 dev.duckdb.wal
-target/
-dbt_packages/
-logs/
+dev.duckcb
 .env
 __pycache__/
 *.pyc

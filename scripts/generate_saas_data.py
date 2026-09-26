@@ -1,133 +1,147 @@
-import os
 import random
 import time
 from datetime import datetime, timedelta
-import stripe
+import duckdb
+import pandas as pd
 
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-
-if not stripe.api_key:
-    raise ValueError("STRIPE_SECRET_KEY environment variable is not set!")
-
-PLANS = [
-    {"name": "Starter Monthly", "amount": 2900, "interval": "month"},
-    {"name": "Starter Yearly", "amount": 29000, "interval": "year"},
-    {"name": "Pro Monthly", "amount": 9900, "interval": "month"},
-    {"name": "Pro Yearly", "amount": 99000, "interval": "year"},
-    {"name": "Enterprise Monthly", "amount": 29900, "interval": "month"},
-    {"name": "Enterprise Yearly", "amount": 299000, "interval": "year"},
-]
-
-def get_random_historical_timestamp(start_year=2023, end_offset_days=60):
-    """Generates a random epoch timestamp between start_year-01-01 and (today - offset)."""
+def get_random_historical_timestamp(start_year=2023, max_days_ago=60):
     start_date = datetime(start_year, 1, 1)
-    end_date = datetime.now() - timedelta(days=end_offset_days)
-    if end_date <= start_date:
-        end_date = datetime.now()
+    end_date = datetime.now() - timedelta(days=max_days_ago)
     delta_seconds = int((end_date - start_date).total_seconds())
     random_seconds = random.randint(0, delta_seconds)
-    random_date = start_date + timedelta(seconds=random_seconds)
-    return int(time.mktime(random_date.timetuple()))
+    return int(time.mktime((start_date + timedelta(seconds=random_seconds)).timetuple()))
 
-def setup_base_products_and_coupons():
-    print("Setting up SaaS products, prices, and coupons in Stripe...")
-    prices = []
-    for plan in PLANS:
-        product = stripe.Product.create(name=plan["name"])
-        price = stripe.Price.create(
-            unit_amount=plan["amount"],
-            currency="usd",
-            recurring={"interval": plan["interval"]},
-            product=product.id,
-        )
-        prices.append({
-            "id": price.id, 
-            "interval": plan["interval"], 
-            "amount": plan["amount"],
-            "name": plan["name"]
-        })
+PLANS = [
+    {"id": "price_starter_m", "name": "Starter Monthly", "amount": 2900, "interval": "month"},
+    {"id": "price_starter_y", "name": "Starter Yearly", "amount": 29000, "interval": "year"},
+    {"id": "price_pro_m", "name": "Pro Monthly", "amount": 9900, "interval": "month"},
+    {"id": "price_pro_y", "name": "Pro Yearly", "amount": 99000, "interval": "year"},
+    {"id": "price_enterprise_m", "name": "Enterprise Monthly", "amount": 29900, "interval": "month"},
+    {"id": "price_enterprise_y", "name": "Enterprise Yearly", "amount": 299000, "interval": "year"},
+]
 
-    coupon_10 = stripe.Coupon.create(percent_off=10, duration="repeating", duration_in_months=3, name="SMB_10_OFF")
-    coupon_20 = stripe.Coupon.create(percent_off=20, duration="once", name="PROMO_20_OFF")
+def generate_and_load_duckdb(total_customers=300, db_path="dev.duckdb"):
+    print(f"Generating {total_customers} backdated B2B SaaS records directly into DuckDB...")
     
-    return prices, [coupon_10.id, coupon_20.id]
-
-def generate_realistic_saas_dataset(total_customers=300):
-    prices, coupons = setup_base_products_and_coupons()
-    
-    print(f"\nSeeding {total_customers} production-grade B2B SaaS lifecycle journeys into Stripe API (2023–2026)...")
+    customers = []
+    subscriptions = []
+    invoices = []
 
     for i in range(1, total_customers + 1):
+        cust_id = f"cus_test_{i:04d}"
         company_name = f"Company_{i:03d} Inc"
         email = f"billing@company_{i:03d}.com"
         
-        # 1. Backdate Customer Signup Timestamp (2023 to ~60 days ago)
-        signup_ts = get_random_historical_timestamp(start_year=2023, end_offset_days=60)
-
-        customer = stripe.Customer.create(
-            email=email,
-            name=company_name,
-            source="tok_visa",
-            metadata={
-                "segment": random.choice(["SMB", "Mid-Market", "Enterprise"]),
-                "acquisition_channel": random.choice(["Inbound", "Outbound SDR", "Organic Search", "Paid Ads"]),
-            }
-        )
-
-        chosen_price = random.choice(prices)
-        applied_coupon = random.choice(coupons) if random.random() < 0.25 else None
-
-        # 2. SUBSCRIPTION CREATION (Backdated via backdate_start_date)
-        sub_params = {
-            "customer": customer.id,
-            "items": [{"price": chosen_price["id"]}],
-            "backdate_start_date": signup_ts,
-            "proration_behavior": "create_prorations",
-        }
-        if applied_coupon:
-            sub_params["discounts"] = [{"coupon": applied_coupon}]
-
-        subscription = stripe.Subscription.create(**sub_params)
-
-        # Finalize initial backdated invoice
-        if getattr(subscription, "latest_invoice", None):
-            try:
-                inv_id = subscription.latest_invoice
-                if isinstance(inv_id, dict):
-                    inv_id = inv_id.get("id")
-                stripe.Invoice.pay(inv_id)
-            except Exception:
-                pass
-
-        # 3. REAL-WORLD LIFECYCLE MUTATIONS (Expansions, Contractions, Churn)
-        roll = random.random()
+        # 1. Backdated customer creation date (2023 - 2026)
+        cust_created = get_random_historical_timestamp(start_year=2023, max_days_ago=120)
         
-        # SCENARIO A: Mid-Cycle Expansion/Contraction (30% probability)
-        if roll < 0.30:
-            target_price = random.choice([p for p in prices if p["id"] != chosen_price["id"]])
-            try:
-                subscription = stripe.Subscription.modify(
-                    subscription.id,
-                    items=[{
-                        "id": subscription["items"]["data"][0]["id"],
-                        "price": target_price["id"],
-                    }],
-                    proration_behavior="always_invoice",
-                )
-            except Exception:
-                pass
+        customers.append({
+            "id": cust_id,
+            "name": company_name,
+            "email": email,
+            "currency": "usd",
+            "balance": 0,
+            "created": cust_created,
+            "delinquent": False,
+            "livemode": False,
+            "metadata": {
+                "segment": random.choice(["SMB", "Mid-Market", "Enterprise"]),
+                "acquisition_channel": random.choice(["Inbound", "Outbound SDR", "Organic Search", "Paid Ads"])
+            }
+        })
 
-        # SCENARIO B: Churn / Cancellation (20% probability)
-        elif roll < 0.50:
-            try:
-                stripe.Subscription.cancel(subscription.id, invoice_now=True)
-            except Exception:
-                pass
+        # 2. Subscription starts shortly after customer registration
+        sub_id = f"sub_test_{i:04d}"
+        sub_created = cust_created + random.randint(86400, 864000) # 1 to 10 days later
+        chosen_plan = random.choice(PLANS)
+        
+        roll = random.random()
+        status = "active"
+        canceled_at = None
+        ended_at = None
+        
+        if roll < 0.20:
+            status = "canceled"
+            canceled_at = sub_created + random.randint(2592000, 15552000) # Canceled 1-6 months later
+            ended_at = canceled_at
 
-        if i % 25 == 0 or i == total_customers:
-            print(f"Progress: {i}/{total_customers} customer lifecycle journeys synced to Stripe API...")
+        subscriptions.append({
+            "id": sub_id,
+            "customer": cust_id,
+            "status": status,
+            "created": sub_created,
+            "billing_cycle_anchor": sub_created,
+            "cancel_at": None,
+            "canceled_at": canceled_at,
+            "ended_at": ended_at,
+            "trial_start": None,
+            "trial_end": None,
+            "cancel_at_period_end": False,
+            "quantity": 1,
+            "plan": {
+                "id": chosen_plan["id"],
+                "interval": chosen_plan["interval"],
+                "interval_count": 1,
+                "amount": chosen_plan["amount"]
+            }
+        })
 
-    print("\nProduction-grade dataset successfully generated directly inside Stripe!")
+        # 3. Synchronized invoice timestamps
+        inv_id = f"in_test_{i:04d}"
+        invoices.append({
+            "id": inv_id,
+            "customer": cust_id,
+            "number": f"INV-{i:04d}",
+            "parent": {"subscription_details": sub_id},
+            "status": "paid" if status == "active" else "void",
+            "currency": "usd",
+            "billing_reason": "subscription_create",
+            "collection_method": "charge_automatically",
+            "amount_due": chosen_plan["amount"],
+            "amount_paid": chosen_plan["amount"] if status == "active" else 0,
+            "amount_remaining": 0,
+            "subtotal": chosen_plan["amount"],
+            "total": chosen_plan["amount"],
+            "starting_balance": 0,
+            "ending_balance": 0,
+            "attempted": True,
+            "livemode": False,
+            "created": sub_created,
+            "due_date": sub_created,
+            "effective_at": sub_created,
+            "period_start": sub_created,
+            "period_end": sub_created + (2592000 if chosen_plan["interval"] == "month" else 31536000),
+            "status_transitions": {
+                "finalized_at": sub_created,
+                "marked_uncollectible_at": None,
+                "paid_at": sub_created if status == "active" else None,
+                "voided_at": sub_created if status == "canceled" else None
+            }
+        })
+
+    # Convert Python lists to Pandas DataFrames
+    df_cust = pd.DataFrame(customers)
+    df_sub = pd.DataFrame(subscriptions)
+    df_inv = pd.DataFrame(invoices)
+
+    # Load directly into DuckDB raw schema
+    conn = duckdb.connect(db_path)
+    conn.execute("create schema if not exists raw;")
+    
+    conn.execute("drop table if exists raw.raw_stripe_customers;")
+    conn.execute("drop table if exists raw.raw_stripe_subscriptions;")
+    conn.execute("drop table if exists raw.raw_stripe_invoices;")
+
+    conn.register("df_cust", df_cust)
+    conn.register("df_sub", df_sub)
+    conn.register("df_inv", df_inv)
+
+    conn.execute("create table raw.raw_stripe_customers as select * from df_cust;")
+    conn.execute("create table raw.raw_stripe_subscriptions as select * from df_sub;")
+    conn.execute("create table raw.raw_stripe_invoices as select * from df_inv;")
+
+    conn.close()
+    print("Database populated successfully with realistic 2023-2026 timelines!")
 
 if __name__ == "__main__":
-    generate_realistic_saas_dataset(total_customers=300)
+    generate_and_load_duckdb(total_customers=300)

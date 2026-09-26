@@ -1,0 +1,12 @@
+version: 2 
+
+sources: 
+  - name: raw_stripe
+    schema: raw
+    tables: 
+      - name: raw_stripe_customers
+        description: "Raw customers objects directly imported from the stripe API"
+      - name: raw_stripe_subscriptions
+        describe: "Every subscriptions unique identity"
+      - name: raw_stripe_invoices
+        description: "Every subsccription login"
